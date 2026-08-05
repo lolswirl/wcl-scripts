@@ -216,6 +216,10 @@ def pull_label_for(fight_id, pull_numbers):
     return f"fight {fight_id}"
 
 
+def event_link(report_code, fight_id, ts, window_ms=5000):
+    return f"https://www.warcraftlogs.com/reports/{report_code}?fight={fight_id}&type=summary&view=events&start={ts}&end={ts + window_ms}"
+
+
 def out_file_path(report_code, fight_id=None):
     out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "out")
     os.makedirs(out_dir, exist_ok=True)
@@ -249,7 +253,8 @@ def run_single(token, report_code, fight_id):
             abilities = ", ".join(
                 ability_names.get(e["abilityGameID"], f"id:{e['abilityGameID']}") for e in group
             )
-            print(f"[{fmt_time(rel_ts)}]  {target_name}  ->  {abilities}")
+            link = event_link(report_code, fight_id, ts)
+            print(f"[{fmt_time(rel_ts)}]  {target_name}  ->  {abilities}\n  {link}")
     print(f"\nwrote output to {out_path}")
 
 
@@ -287,7 +292,8 @@ def run_aggregate(token, report_code):
                 ability_names.get(e["abilityGameID"], f"id:{e['abilityGameID']}") for e in group
             )
             pull_label = pull_label_for(fight_id, pull_numbers)
-            detail_lines.append(((fight_index, ts), f"  {pull_label} [{fmt_time(rel_ts)}]  {target_name}  ->  {abilities}"))
+            link = event_link(report_code, fight_id, ts)
+            detail_lines.append(((fight_index, ts), f"  {pull_label} [{fmt_time(rel_ts)}]  {target_name}  ->  {abilities}\n    {link}"))
 
     detail_lines.sort(key=lambda x: x[0])
 
