@@ -227,86 +227,79 @@ def out_file_path(report_code, fight_id=None):
     return os.path.join(out_dir, name)
 
 
-def run_single(token, report_code, fight_id):
+def format_hit(report_code, fight_id, start_time, target_id, ts, group, actor_names, ability_names, prefix=""):
+    rel_ts = ts - start_time
+    target_name = actor_names.get(target_id, f"id:{target_id}")
+    abilities = ", ".join(
+        ability_names.get(e["abilityGameID"], f"id:{e['abilityGameID']}") for e in group
+    )
+    link = event_link(report_code, fight_id, ts)
+    return f"{prefix}[{fmt_time(rel_ts)}]  {target_name}  ->  {abilities}\n{prefix}  {link}"
+
+
+def fetch_all_hits(token, report_code, fight_ids):
+    fight_windows, _ = get_fight_data(token, report_code)
+
+    def fetch(fight_id):
+        start_time, end_time = fight_windows[fight_id]
+        events = get_events(token, report_code, start_time, end_time)
+        return fight_id, start_time, find_hits(events)
+
+    fight_hits = {}
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = [pool.submit(fetch, fight_id) for fight_id in fight_ids]
+        for future in as_completed(futures):
+            fight_id, start_time, hits = future.result()
+            fight_hits[fight_id] = (start_time, hits)
+    return fight_hits
+
+
+def run(token, report_code, fight_id=None):
     with Spinner("fetching fight data..."):
         fight_windows, pull_numbers = get_fight_data(token, report_code)
-        if fight_id not in fight_windows:
+        if fight_id is not None and fight_id not in fight_windows:
             raise RuntimeError(f"fight {fight_id} not found in report {report_code}")
         actor_names, ability_names = get_master_data(token, report_code)
 
-        start_time, end_time = fight_windows[fight_id]
-        events = get_events(token, report_code, start_time, end_time)
-        hits = find_hits(events)
+        fight_ids = [fight_id] if fight_id is not None else list(fight_windows)
+        fight_hits = fetch_all_hits(token, report_code, fight_ids)
 
-    pull_label = pull_label_for(fight_id, pull_numbers)
-
-    out_path = out_file_path(report_code, fight_id)
-    with open(out_path, "w") as out_f, redirect_stdout(Tee(sys.stdout, out_f)):
-        if not hits:
-            print(f"no simultaneous removals found ({pull_label})")
-            return
-
-        print(f"found {len(hits)} simultaneous removals ({pull_label}):\n")
-        for target_id, ts, group in sorted(hits, key=lambda h: h[1]):
-            rel_ts = ts - start_time
-            target_name = actor_names.get(target_id, f"id:{target_id}")
-            abilities = ", ".join(
-                ability_names.get(e["abilityGameID"], f"id:{e['abilityGameID']}") for e in group
-            )
-            link = event_link(report_code, fight_id, ts)
-            print(f"[{fmt_time(rel_ts)}]  {target_name}  ->  {abilities}\n  {link}")
-    print(f"\nwrote output to {out_path}")
-
-
-def run_aggregate(token, report_code):
-    with Spinner("fetching fight data..."):
-        actor_names, ability_names = get_master_data(token, report_code)
-        fight_windows, pull_numbers = get_fight_data(token, report_code)
-
-        colliding_ability_counter = Counter()
-        total_hits = 0
-        fight_hits = {} # fight_id -> (start_time, hits)
-
-        def fetch_hits(fight_id):
-            start_time, end_time = fight_windows[fight_id]
-            events = get_events(token, report_code, start_time, end_time)
-            return fight_id, start_time, find_hits(events)
-
-        with ThreadPoolExecutor(max_workers=8) as pool:
-            futures = [pool.submit(fetch_hits, fight_id) for fight_id in fight_windows]
-            for future in as_completed(futures):
-                fight_id, start_time, hits = future.result()
-                fight_hits[fight_id] = (start_time, hits)
-
+    colliding_ability_counter = Counter()
+    total_hits = 0
     detail_lines = []
-    for fight_index, fight_id in enumerate(fight_windows):
-        start_time, hits = fight_hits[fight_id]
-        for target_id, ts, group in hits:
+    for fight_index, fid in enumerate(fight_ids):
+        start_time, hits = fight_hits[fid]
+        for target_id, ts, group in sorted(hits, key=lambda h: h[1]):
             total_hits += 1
             other_abilities = [e["abilityGameID"] for e in group if e["abilityGameID"] != SPIRITFONT_ID]
             for aid in other_abilities:
                 colliding_ability_counter[ability_names.get(aid, f"id:{aid}")] += 1
-            rel_ts = ts - start_time
-            target_name = actor_names.get(target_id, f"id:{target_id}")
-            abilities = ", ".join(
-                ability_names.get(e["abilityGameID"], f"id:{e['abilityGameID']}") for e in group
-            )
-            pull_label = pull_label_for(fight_id, pull_numbers)
-            link = event_link(report_code, fight_id, ts)
-            detail_lines.append(((fight_index, ts), f"  {pull_label} [{fmt_time(rel_ts)}]  {target_name}  ->  {abilities}\n    {link}"))
+
+            prefix = "" if fight_id is not None else f"  {pull_label_for(fid, pull_numbers)} "
+            line = format_hit(report_code, fid, start_time, target_id, ts, group, actor_names, ability_names, prefix)
+            detail_lines.append(((fight_index, ts), line))
 
     detail_lines.sort(key=lambda x: x[0])
 
-    out_path = out_file_path(report_code)
+    out_path = out_file_path(report_code, fight_id)
     with open(out_path, "w") as out_f, redirect_stdout(Tee(sys.stdout, out_f)):
-        print(f"total qualifying simultaneous-removal hits across {len(fight_windows)} fights: {total_hits}\n")
-        print("colliding ability counts:")
-        for name, count in colliding_ability_counter.most_common():
-            print(f"  {count:3d}  {name}")
+        if fight_id is not None:
+            pull_label = pull_label_for(fight_id, pull_numbers)
+            if not total_hits:
+                print(f"no simultaneous removals found ({pull_label})")
+            else:
+                print(f"found {total_hits} simultaneous removals ({pull_label}):\n")
+                for _, line in detail_lines:
+                    print(line)
+        else:
+            print(f"total qualifying simultaneous-removal hits across {len(fight_windows)} fights: {total_hits}\n")
+            print("colliding ability counts:")
+            for name, count in colliding_ability_counter.most_common():
+                print(f"  {count:3d}  {name}")
 
-        print("\ndetail:")
-        for _, line in detail_lines:
-            print(line)
+            print("\ndetail:")
+            for _, line in detail_lines:
+                print(line)
     print(f"\nwrote output to {out_path}")
 
 
@@ -318,11 +311,8 @@ def main():
 
     report_code = sys.argv[1]
     token = get_token()
-
-    if len(sys.argv) == 3:
-        run_single(token, report_code, int(sys.argv[2]))
-    else:
-        run_aggregate(token, report_code)
+    fight_id = int(sys.argv[2]) if len(sys.argv) == 3 else None
+    run(token, report_code, fight_id)
 
 
 if __name__ == "__main__":
